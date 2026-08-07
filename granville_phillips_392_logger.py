@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path(".data/"),
+        default=Path("./data/"),
         help="Directory where daily CSV files are stored (default: ./data/).",
     )
     parser.add_argument(
