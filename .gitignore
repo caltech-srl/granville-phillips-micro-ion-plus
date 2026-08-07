@@ -42,3 +42,4 @@ vscode/
 old_data/
 data/
 **/*.csv
+.vscode/
