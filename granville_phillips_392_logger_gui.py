@@ -12,7 +12,7 @@ original serial protocol and CSV logging behavior while adding:
 - Blank pressure entries for protocol errors, preserving the sample record.
 - Live pressure/statistics display and application log.
 - Average rate-of-change display tied to the selected graph live window.
-- Torr values displayed with four significant figures, including trailing zeros.
+- Torr values displayed in scientific notation with four decimal places, including trailing zeros.
 - Matplotlib pressure history with pan, zoom, mouse-wheel navigation, and a
   Reset / Follow Live button.
 - Recent history preloaded in memory, with older daily CSV files loaded lazily
@@ -92,18 +92,18 @@ def is_torr_unit(unit: str) -> bool:
 
 
 def format_pressure_value(value: float, unit: str) -> str:
-    """Format pressure for display, using exactly four significant figures in Torr."""
+    """Format pressure for display, using four decimal places in scientific notation for Torr."""
     if is_torr_unit(unit):
-        # Scientific notation guarantees four significant figures, including
-        # trailing zeros (for example 1.230E-06 instead of 1.23E-06).
-        return f"{value:.3E}"
+        # Scientific notation with four digits after the decimal preserves
+        # trailing zeros (for example 1.2300E-06).
+        return f"{value:.4E}"
     return f"{value:.6g}"
 
 
 def format_rate_value(value: float, unit: str) -> str:
     """Format a signed pressure rate for display."""
     if is_torr_unit(unit):
-        return f"{value:+.3E}"
+        return f"{value:+.4E}"
     return f"{value:+.6g}"
 
 
