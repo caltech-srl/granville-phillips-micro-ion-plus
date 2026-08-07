@@ -11,6 +11,8 @@ original serial protocol and CSV logging behavior while adding:
 - Daily CSV files with timestamp, pressure, unit columns.
 - Blank pressure entries for protocol errors, preserving the sample record.
 - Live pressure/statistics display and application log.
+- Average rate-of-change display tied to the selected graph live window.
+- Torr values displayed with four significant figures, including trailing zeros.
 - Matplotlib pressure history with pan, zoom, mouse-wheel navigation, and a
   Reset / Follow Live button.
 - Recent history preloaded in memory, with older daily CSV files loaded lazily
@@ -47,6 +49,7 @@ import serial
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 from PyQt6.QtCore import QPoint, QSize, QSettings, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCloseEvent, QFont, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
@@ -81,6 +84,27 @@ from serial.tools import list_ports
 FLOAT_PATTERN = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?$"
 )
+
+
+def is_torr_unit(unit: str) -> bool:
+    """Return True when the gauge unit is Torr (case-insensitive)."""
+    return unit.strip().upper() == "TORR"
+
+
+def format_pressure_value(value: float, unit: str) -> str:
+    """Format pressure for display, using exactly four significant figures in Torr."""
+    if is_torr_unit(unit):
+        # Scientific notation guarantees four significant figures, including
+        # trailing zeros (for example 1.230E-06 instead of 1.23E-06).
+        return f"{value:.3E}"
+    return f"{value:.6g}"
+
+
+def format_rate_value(value: float, unit: str) -> str:
+    """Format a signed pressure rate for display."""
+    if is_torr_unit(unit):
+        return f"{value:+.3E}"
+    return f"{value:+.6g}"
 
 
 class GaugeError(RuntimeError):
@@ -444,7 +468,8 @@ class LoggerThread(QThread):
                     append_csv(csv_path, timestamp, pressure, gauge.unit)
                     self.reading.emit(timestamp, pressure, gauge.unit, str(csv_path))
                     self.log_message.emit(
-                        f"{timestamp} | {pressure:.9g} {gauge.unit} | appended to {csv_path}",
+                        f"{timestamp} | {format_pressure_value(pressure, gauge.unit)} "
+                        f"{gauge.unit} | appended to {csv_path}",
                         "info",
                     )
                 except GaugeProtocolError as exc:
@@ -625,6 +650,7 @@ class BlackNavigationToolbar(NavigationToolbar2QT):
 class PressureGraph(QWidget):
     history_requested = pyqtSignal(object)  # datetime target
     follow_changed = pyqtSignal(bool)
+    window_changed = pyqtSignal(str)
     WINDOW_OPTIONS = {
         "15 min": timedelta(minutes=15),
         "1 hour": timedelta(hours=1),
@@ -657,7 +683,7 @@ class PressureGraph(QWidget):
         self.window_combo.setCurrentText("1 hour")
         self.window_combo.setMinimumHeight(30)
         self.window_combo.setMinimumWidth(92)
-        self.window_combo.currentTextChanged.connect(self.reset_live_view)
+        self.window_combo.currentTextChanged.connect(self._on_window_changed)
         header.addWidget(self.window_combo)
         self.reset_button = QPushButton("Reset / Follow Live")
         self.reset_button.setObjectName("PrimaryButton")
@@ -681,6 +707,8 @@ class PressureGraph(QWidget):
         self.ax.set_xlabel("Local time")
         self.ax.grid(True, alpha=0.18)
         self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d\n%H:%M"))
+        self.ax.yaxis.set_major_formatter(FuncFormatter(self._format_y_tick))
+        self.ax.format_ydata = self._format_y_cursor
         self.ax.callbacks.connect("xlim_changed", self._on_xlim_changed)
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_user_navigation)
@@ -691,6 +719,23 @@ class PressureGraph(QWidget):
         """Show only the plot canvas when the main window is in compact mode."""
         self.header_widget.setVisible(not compact)
         self.toolbar.setVisible(not compact)
+
+    def _display_unit(self) -> str:
+        """Use the newest known history unit when formatting graph pressure values."""
+        for point in reversed(self.store.points):
+            if point.unit:
+                return point.unit
+        return "UNKNOWN"
+
+    def _format_y_tick(self, value: float, _position: object = None) -> str:
+        return format_pressure_value(float(value), self._display_unit())
+
+    def _format_y_cursor(self, value: float) -> str:
+        return format_pressure_value(float(value), self._display_unit())
+
+    def _on_window_changed(self, text: str) -> None:
+        self.reset_live_view()
+        self.window_changed.emit(text)
 
     def _style_axes(self) -> None:
         self.ax.set_facecolor("#ffffff")
@@ -880,6 +925,7 @@ class MainWindow(QMainWindow):
         self._load_saved_settings()
         self.refresh_ports(log_result=False)
         self.graph.refresh_data(preserve_view=False)
+        self._update_rate_of_change()
         self._update_responsive_layout(force=True)
         if preloaded:
             self.add_log(
@@ -939,6 +985,7 @@ class MainWindow(QMainWindow):
         graph_layout.setContentsMargins(10, 12, 10, 10)
         graph_layout.addWidget(self.graph)
         self.graph.history_requested.connect(self._load_older_history)
+        self.graph.window_changed.connect(self._update_rate_of_change)
         for widget in (self.controls_panel, self.stats_panel, self.logs_panel, self.graph_box):
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body.addWidget(self.controls_panel, 0, 0)
@@ -1162,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.min_card = StatCard("Session minimum", "—")
         self.max_card = StatCard("Session maximum", "—")
         self.average_card = StatCard("Session average", "—")
+        self.rate_card = StatCard("Rate of change", "—")
         self.file_card = StatCard("Current CSV", "—")
         self.memory_card = StatCard("History in memory", f"{len(self.history.points):,} rows")
         top_cards = [
@@ -1176,9 +1224,12 @@ class MainWindow(QMainWindow):
         ]
         for index, card in enumerate(top_cards):
             grid.addWidget(card, index // 4, index % 4)
+        # Rate of change is intentionally wide because it includes the signed
+        # value, unit/minute, and the currently selected graph window.
+        grid.addWidget(self.rate_card, 2, 0, 1, 4)
         # The two potentially wider values share the full last row.
-        grid.addWidget(self.file_card, 2, 0, 1, 2)
-        grid.addWidget(self.memory_card, 2, 2, 1, 2)
+        grid.addWidget(self.file_card, 3, 0, 1, 2)
+        grid.addWidget(self.memory_card, 3, 2, 1, 2)
         layout.addWidget(self.stats_cards_widget, 1)
         return panel
 
@@ -1322,6 +1373,7 @@ class MainWindow(QMainWindow):
         self.history.set_base_dir(path)
         self.graph.refresh_data(preserve_view=False)
         self.memory_card.set_value(f"{len(self.history.points):,} rows")
+        self._update_rate_of_change()
         self.add_log(
             f"History folder changed to {path}; loaded {len(self.history.points):,} recent rows.",
             "muted",
@@ -1440,7 +1492,7 @@ class MainWindow(QMainWindow):
             self.pressure_value.setProperty("error", True)
         else:
             self.session_pressures.append(pressure)
-            self.pressure_value.setText(f"{pressure:.6g}")
+            self.pressure_value.setText(format_pressure_value(pressure, unit))
             self.pressure_value.setProperty("error", False)
         self.pressure_value.style().unpolish(self.pressure_value)
         self.pressure_value.style().polish(self.pressure_value)
@@ -1451,6 +1503,7 @@ class MainWindow(QMainWindow):
         self.memory_card.set_value(f"{len(self.history.points):,} rows")
         self._update_session_stats()
         self.graph.refresh_data(preserve_view=True)
+        self._update_rate_of_change()
 
     def _update_session_stats(self) -> None:
         self.samples_card.set_value(f"{self.session_samples:,}")
@@ -1464,9 +1517,65 @@ class MainWindow(QMainWindow):
         maximum = max(self.session_pressures)
         average = sum(self.session_pressures) / len(self.session_pressures)
         unit = self.current_unit
-        self.min_card.set_value(f"{minimum:.6g} {unit}")
-        self.max_card.set_value(f"{maximum:.6g} {unit}")
-        self.average_card.set_value(f"{average:.6g} {unit}")
+        self.min_card.set_value(f"{format_pressure_value(minimum, unit)} {unit}")
+        self.max_card.set_value(f"{format_pressure_value(maximum, unit)} {unit}")
+        self.average_card.set_value(f"{format_pressure_value(average, unit)} {unit}")
+
+    def _update_rate_of_change(self, *_args) -> None:
+        """Show average pressure change per minute over the selected live window."""
+        if not hasattr(self, "rate_card") or not hasattr(self, "graph"):
+            return
+
+        window_text = self.graph.window_combo.currentText()
+        selected = self.graph.WINDOW_OPTIONS.get(window_text)
+        if not self.history.points:
+            self.rate_card.set_value(f"— · {window_text}")
+            return
+
+        # Match the graph's live-window anchor exactly, including a newest row
+        # whose pressure is invalid/blank. That prevents a read error from
+        # quietly extending a 15-minute or 1-hour rate window farther back.
+        window_end = self.history.points[-1].timestamp
+        cutoff = None if selected is None else window_end - selected
+
+        valid_points = [
+            point
+            for point in self.history.points
+            if point.pressure is not None
+            and math.isfinite(point.pressure)
+            and (cutoff is None or point.timestamp >= cutoff)
+            and point.timestamp <= window_end
+        ]
+        if len(valid_points) < 2:
+            self.rate_card.set_value(f"— · {window_text}")
+            return
+
+        latest = valid_points[-1]
+        unit = latest.unit or self.current_unit
+
+        # Do not mix readings recorded in different pressure units. The newest
+        # valid point in the selected window establishes the calculation unit.
+        window_points = [
+            point
+            for point in valid_points
+            if point.unit.strip().upper() == unit.strip().upper()
+        ]
+        if len(window_points) < 2:
+            self.rate_card.set_value(f"— · {window_text}")
+            return
+
+        first = window_points[0]
+        last = window_points[-1]
+        elapsed_minutes = (last.timestamp - first.timestamp).total_seconds() / 60.0
+        if elapsed_minutes <= 0.0:
+            self.rate_card.set_value(f"— · {window_text}")
+            return
+
+        rate = (float(last.pressure) - float(first.pressure)) / elapsed_minutes
+        self.rate_card.set_value(
+            f"{format_rate_value(rate, unit)} {unit}/min · {window_text}"
+        )
+
     # ---------- History / graph ----------
 
     def _load_older_history(self, target_time: datetime) -> None:
@@ -1481,6 +1590,7 @@ class MainWindow(QMainWindow):
         )
         self.memory_card.set_value(f"{len(self.history.points):,} rows")
         self.graph.refresh_data(preserve_view=True)
+        self._update_rate_of_change()
     # ---------- Logging / styling / close ----------
 
     def add_log(self, message: str, level: str = "info") -> None:
