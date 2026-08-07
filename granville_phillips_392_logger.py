@@ -61,11 +61,11 @@ class GranvillePhillips392:
         baudrate: int = 19200,
         timeout: float = 1.0,
     ) -> None:
-        if not 0 <= address <= 15:
-            raise ValueError("Address must be between 0 and 15.")
+        if not 0 <= address <= 0xF:
+            raise ValueError("Address must be between 0 and F.")
 
         self.port_name = port
-        self.address = f"{address:02d}"
+        self.address = f"{address:02X}"
         self.baudrate = baudrate
         self.timeout = timeout
         self.port: Optional[serial.Serial] = None
@@ -102,7 +102,7 @@ class GranvillePhillips392:
         Send one gauge command and return the response data field.
 
         Command framing:
-            #<two-digit address><command><CR>
+            #<one-digit hex address><command><CR>
 
         CR is sent without LF. Converter echo, if present, is ignored.
         """
@@ -233,9 +233,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--address",
-        type=int,
+        type=lambda value: int(value, 16),
         default=1,
-        help="Gauge address from 0 to 15 (default: 1).",
+        help="Gauge hex address from 0 to F (default: 1).",
     )
     parser.add_argument(
         "--baud",
@@ -296,7 +296,7 @@ def main() -> int:
                     gauge.connect()
                     print(
                         f"Connected to {args.port}; "
-                        f"address={args.address:02d}, baud={args.baud}, "
+                        f"address={args.address:X}, baud={args.baud}, "
                         f"unit={gauge.unit}"
                     )
                     next_read = time.monotonic()
