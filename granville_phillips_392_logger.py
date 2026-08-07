@@ -16,6 +16,9 @@ Examples:
     Linux:
         python granville_phillips_392_logger.py --port /dev/ttyUSB0
 
+    Auto-select/prompt for a serial port:
+        python granville_phillips_392_logger.py
+
     List serial ports:
         python granville_phillips_392_logger.py --list-ports
 
@@ -203,6 +206,45 @@ def print_serial_ports() -> None:
         print(f"{port.device}: {port.description or 'Unknown device'}")
 
 
+def select_serial_port() -> Optional[str]:
+    """Automatically select one serial port or prompt when several exist."""
+    ports = list(list_ports.comports())
+
+    if not ports:
+        print("Error: no serial ports found.", file=sys.stderr)
+        return None
+
+    if len(ports) == 1:
+        port = ports[0]
+        print(
+            f"Using the only detected serial port: "
+            f"{port.device} ({port.description or 'Unknown device'})"
+        )
+        return port.device
+
+    print("Multiple serial ports found:")
+    for index, port in enumerate(ports, start=1):
+        print(f"  {index}. {port.device}: {port.description or 'Unknown device'}")
+
+    while True:
+        try:
+            choice = input(f"Select a port [1-{len(ports)}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nPort selection cancelled.", file=sys.stderr)
+            return None
+
+        try:
+            selection = int(choice)
+        except ValueError:
+            print(f"Please enter a number from 1 to {len(ports)}.")
+            continue
+
+        if 1 <= selection <= len(ports):
+            return ports[selection - 1].device
+
+        print(f"Please enter a number from 1 to {len(ports)}.")
+
+
 def current_csv_path(base_dir: Path) -> Path:
     date = local_timestamp_path()
     return base_dir / f"pressure_log_{date}.csv"
@@ -272,8 +314,9 @@ def main() -> int:
         return 0
 
     if not args.port:
-        print("Error: --port is required unless --list-ports is used.", file=sys.stderr)
-        return 2
+        args.port = select_serial_port()
+        if not args.port:
+            return 2
 
     if args.interval <= 0:
         print("Error: --interval must be greater than zero.", file=sys.stderr)
